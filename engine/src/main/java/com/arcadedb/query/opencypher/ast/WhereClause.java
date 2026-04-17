@@ -180,6 +180,15 @@ public class WhereClause {
     } else if (expr instanceof BooleanWrapperExpression bwe) {
       collectVariablesRecursive(bwe.getBooleanExpression(), vars);
     }
+    else if (expr instanceof ListPredicateExpression listPred) {
+    collectExpressionVariables(listPred.getListExpression(), vars);
+      if (listPred.getWhereExpression() != null) {
+        final Set<String> innerVars = new HashSet<>();
+        collectExpressionVariables(listPred.getWhereExpression(), innerVars);
+        innerVars.remove(listPred.getVariable());
+        vars.addAll(innerVars);
+      }
+    }
   }
 
   /**

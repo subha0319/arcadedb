@@ -36,6 +36,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 ;
 
@@ -928,6 +929,40 @@ public class OpenCypherWhereClauseTest {
 
       assertThat(count1).isEqualTo(count2)
           .withFailMessage("Complex query with triple parentheses: Expected both queries to return the same number of results");
+    }
+
+    @Test
+    public void testAnyPredicateInWhere() {
+        // Cleanup first to ensure a clean state
+        database.command("opencypher", "MATCH (n:Person) DETACH DELETE n");
+
+        database.command("opencypher",
+            "CREATE (:Person {name:'Alice'}), (:Person {name:'Bob'}), (:Person {name:'Charlie'})");
+
+        ResultSet rs = database.query("opencypher",
+            "MATCH (p:Person) WHERE any(x IN ['Alice'] WHERE x = p.name) RETURN p.name AS name ORDER BY name");
+
+        List<String> names = new ArrayList<>();
+        while (rs.hasNext()) names.add(rs.next().getProperty("name"));
+
+        assertEquals(List.of("Alice"), names);
+    }
+
+    @Test
+    public void testNotAnyPredicateInWhere() {
+        // Cleanup first to ensure a clean state
+        database.command("opencypher", "MATCH (n:Person) DETACH DELETE n");
+
+        database.command("opencypher",
+            "CREATE (:Person {name:'Alice'}), (:Person {name:'Bob'}), (:Person {name:'Charlie'})");
+
+        ResultSet rs = database.query("opencypher",
+            "MATCH (p:Person) WHERE NOT any(x IN ['Alice'] WHERE x = p.name) RETURN p.name AS name ORDER BY name");
+
+        List<String> names = new ArrayList<>();
+        while (rs.hasNext()) names.add(rs.next().getProperty("name"));
+
+        assertEquals(List.of("Bob", "Charlie"), names);
     }
   }
 }
