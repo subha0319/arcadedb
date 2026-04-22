@@ -27,9 +27,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
-
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -329,6 +329,190 @@ class OpenCypherPatternPredicateTest {
         @SuppressWarnings("unchecked")
         final List<Object> resultList = (List<Object>) resultObj;
         assertThat(resultList).isEmpty();
+      }
+    }
+  }
+
+  /** See issue #3938: existential pattern predicate must filter by target-node properties too. */
+  @Nested
+  class ExistentialPatternPredicateTargetPropertiesRegression {
+    private Database database;
+
+    @BeforeEach
+    void setUp() {
+      database = new DatabaseFactory("./target/databases/test-issue3938").create();
+      database.getSchema().createVertexType("Person");
+      database.getSchema().createVertexType("Country");
+      database.getSchema().createEdgeType("LIVING_IN");
+
+      database.transaction(() -> {
+        database.command("opencypher",
+            """
+            CREATE (:Country {name: 'Germany'}), \
+            (:Country {name: 'United Kingdom'}), \
+            (:Person {name: 'Alice'}), \
+            (:Person {name: 'Bob'}), \
+            (:Person {name: 'Charlie'})""");
+        database.command("opencypher",
+            """
+            MATCH (p:Person {name: 'Alice'}), (c:Country {name: 'Germany'}) \
+            CREATE (p)-[:LIVING_IN]->(c)""");
+        database.command("opencypher",
+            """
+            MATCH (p:Person {name: 'Bob'}), (c:Country {name: 'United Kingdom'}) \
+            CREATE (p)-[:LIVING_IN]->(c)""");
+        database.command("opencypher",
+            """
+            MATCH (p:Person {name: 'Charlie'}), (c:Country {name: 'Germany'}) \
+            CREATE (p)-[:LIVING_IN]->(c)""");
+      });
+    }
+
+    @AfterEach
+    void tearDown() {
+      if (database != null) {
+        database.drop();
+        database = null;
+      }
+    }
+
+    @Test
+    void patternPredicateFiltersByTargetNodeProperties() {
+      // Only people living in Germany must pass the predicate.
+      try (final ResultSet rs = database.query("opencypher",
+          """
+          MATCH (p:Person) \
+          WHERE (p)-[:LIVING_IN]->(:Country {name: 'Germany'}) \
+          RETURN p.name AS name ORDER BY name""")) {
+        final Set<String> names = new HashSet<>();
+        while (rs.hasNext())
+          names.add((String) rs.next().getProperty("name"));
+        assertThat(names).containsExactlyInAnyOrder("Alice", "Charlie");
+      }
+    }
+
+    @Test
+    void patternPredicateFiltersByTargetNodePropertiesAnonymousEnd() {
+      // Anonymous end node with property constraint only.
+      try (final ResultSet rs = database.query("opencypher",
+          """
+          MATCH (p:Person) \
+          WHERE (p)-[:LIVING_IN]->({name: 'Germany'}) \
+          RETURN p.name AS name ORDER BY name""")) {
+        final Set<String> names = new HashSet<>();
+        while (rs.hasNext())
+          names.add((String) rs.next().getProperty("name"));
+        assertThat(names).containsExactlyInAnyOrder("Alice", "Charlie");
+      }
+    }
+
+    @Test
+    void patternPredicateFilteredRowDoesNotLeakIntoDownstreamMatch() {
+      // The predicate must cut Bob off, so a later MATCH cannot reintroduce United Kingdom.
+      try (final ResultSet rs = database.query("opencypher",
+          """
+          MATCH (p:Person) \
+          WHERE (p)-[:LIVING_IN]->(:Country {name: 'Germany'}) \
+          WITH p \
+          MATCH (p)-[:LIVING_IN]->(c:Country) \
+          RETURN c.name AS country, count(*) AS cnt \
+          ORDER BY country""")) {
+        assertThat(rs.hasNext()).isTrue();
+        final Result row = rs.next();
+        assertThat((String) row.getProperty("country")).isEqualTo("Germany");
+        assertThat(((Number) row.getProperty("cnt")).longValue()).isEqualTo(2L);
+        assertThat(rs.hasNext()).isFalse();
+      }
+    }
+
+    @Test
+    void negatedPatternPredicateHonorsTargetNodeProperties() {
+      // Only people NOT living in Germany must pass.
+      try (final ResultSet rs = database.query("opencypher",
+          """
+          MATCH (p:Person) \
+          WHERE NOT (p)-[:LIVING_IN]->(:Country {name: 'Germany'}) \
+          RETURN p.name AS name ORDER BY name""")) {
+        final Set<String> names = new HashSet<>();
+        while (rs.hasNext())
+          names.add((String) rs.next().getProperty("name"));
+        assertThat(names).containsExactlyInAnyOrder("Bob");
+      }
+    }
+  }
+
+  @Nested
+  class InlineRelationshipPredicate {
+    private Database db;
+
+    @BeforeEach
+    void setUp() {
+      db = new DatabaseFactory("./databases/test-inline-rel-predicate").create();
+      db.getSchema().createVertexType("Person");
+      db.getSchema().createEdgeType("KNOWS");
+      db.command("opencypher",
+          """
+          CREATE (a:Person {name: 'Alice'}), \
+          (b:Person {name: 'Bob'}), \
+          (c:Person {name: 'Charlie'}), \
+          (a)-[:KNOWS {since: 2018}]->(b), \
+          (a)-[:KNOWS {since: 2020}]->(c)""");
+    }
+
+    @AfterEach
+    void tearDown() {
+      if (db != null)
+        db.drop();
+    }
+
+    @Test
+    void inlineWhereOnRelationshipIsApplied() {
+      // Only the 2018 relationship must match in each direction
+      try (final ResultSet rs = db.query("opencypher",
+          """
+          MATCH (a:Person)-[r:KNOWS WHERE r.since < 2019]-(b) \
+          RETURN DISTINCT a.name AS person, b.name AS friend, r.since AS knowsSince \
+          ORDER BY knowsSince, person, friend""")) {
+        final List<String> rows = new ArrayList<>();
+        while (rs.hasNext()) {
+          final Result row = rs.next();
+          rows.add(row.getProperty("person") + "->" + row.getProperty("friend") + ":" + row.getProperty("knowsSince"));
+        }
+        assertThat(rows).containsExactlyInAnyOrder("Alice->Bob:2018", "Bob->Alice:2018");
+      }
+    }
+
+    @Test
+    void inlineWhereOnRelationshipDirected() {
+      // Directed pattern: only Alice->Bob (since=2018) must be returned
+      try (final ResultSet rs = db.query("opencypher",
+          """
+          MATCH (a:Person)-[r:KNOWS WHERE r.since < 2019]->(b) \
+          RETURN a.name AS person, b.name AS friend, r.since AS knowsSince""")) {
+        assertThat(rs.hasNext()).isTrue();
+        final Result row = rs.next();
+        assertThat((String) row.getProperty("person")).isEqualTo("Alice");
+        assertThat((String) row.getProperty("friend")).isEqualTo("Bob");
+        assertThat(((Number) row.getProperty("knowsSince")).intValue()).isEqualTo(2018);
+        assertThat(rs.hasNext()).isFalse();
+      }
+    }
+
+    @Test
+    void inlineWhereWithExternalWhereClause() {
+      // Combined: inline relationship predicate AND an outer WHERE clause
+      try (final ResultSet rs = db.query("opencypher",
+          """
+          MATCH (a:Person)-[r:KNOWS WHERE r.since < 2019]-(b) \
+          WHERE NOT (b:NonexistentLabel) \
+          RETURN DISTINCT a.name AS person, b.name AS friend, r.since AS knowsSince \
+          ORDER BY knowsSince""")) {
+        final List<String> rows = new ArrayList<>();
+        while (rs.hasNext()) {
+          final Result row = rs.next();
+          rows.add(row.getProperty("person") + "->" + row.getProperty("friend") + ":" + row.getProperty("knowsSince"));
+        }
+        assertThat(rows).containsExactlyInAnyOrder("Alice->Bob:2018", "Bob->Alice:2018");
       }
     }
   }
